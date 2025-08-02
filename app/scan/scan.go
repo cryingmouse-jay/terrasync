@@ -3,11 +3,16 @@ package scan
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"terrasync/db"
 	"terrasync/log"
 	"terrasync/object"
 	"time"
+
+	"github.com/bits-and-blooms/bloom/v3"
+	"github.com/google/uuid"
 )
 
 const (
@@ -56,13 +61,14 @@ func Start(scanConfig ScanConfig, reportConfig ReportConfig) error {
 	GenerateConsoleReportTitle(reportConfig)
 
 	// 开始扫描并应用过滤
-	fileChan := ListAll(storage, scanConfig.Concurrency, matchConditions, excludeConditions)
+	scannedChan := ListAll(storage, scanConfig.Concurrency, matchConditions, excludeConditions)
 
 	if scanConfig.IncrementalScan {
 		// 增量扫描场景,处理文件统计信息
+		ProcessFilesForIncrementalScan(scanConfig, scannedChan, reportConfig)
 	} else {
 		// 全量扫描场景,处理文件统计信息
-		if err := ProcessFilesForFullScan(scanConfig, fileChan, reportConfig); err != nil {
+		if err := ProcessFilesForFullScan(scanConfig, scannedChan, reportConfig); err != nil {
 			return fmt.Errorf("failed to process files: %w", err)
 		}
 	}
@@ -147,7 +153,7 @@ func ListAll(storage object.Storage, concurrency int, matchConditions, excludeCo
 }
 
 // ProcessFilesForFullScan 处理文件统计信息并分发到数据库和Kafka
-func ProcessFilesForFullScan(scanConfig ScanConfig, fileChan <-chan object.FileInfo, reportConfig ReportConfig) error {
+func ProcessFilesForFullScan(scanConfig ScanConfig, scannedChan <-chan object.FileInfo, reportConfig ReportConfig) error {
 	// Initialize database
 	dbInstance, err := InitDatabase(scanConfig.DbType, scanConfig.JobDir)
 	if err != nil {
@@ -156,7 +162,7 @@ func ProcessFilesForFullScan(scanConfig ScanConfig, fileChan <-chan object.FileI
 	}
 	defer func() {
 		closeStartTime := time.Now()
-		if err = dbInstance.Close(); err != nil {
+		if err = (*dbInstance).Close(); err != nil {
 			log.Errorf("Error closing database: %v", err)
 		} else {
 			log.Infof("Database closed successfully in %v", time.Since(closeStartTime))
@@ -200,7 +206,7 @@ func ProcessFilesForFullScan(scanConfig ScanConfig, fileChan <-chan object.FileI
 			bufferLen := len(buffer)
 			if bufferLen >= batchSize {
 				startTime := time.Now()
-				if err := dbInstance.SaveEntries(buffer); err != nil {
+				if err := (*dbInstance).SaveEntries(buffer, ""); err != nil {
 					log.Errorf("Failed to save batch: %v", err)
 				} else {
 					log.Debugf("Saved batch of %d entries in %v", bufferLen, time.Since(startTime))
@@ -212,7 +218,7 @@ func ProcessFilesForFullScan(scanConfig ScanConfig, fileChan <-chan object.FileI
 		// 处理剩余数据
 		bufferLen := len(buffer)
 		if bufferLen > 0 {
-			if err := dbInstance.SaveEntries(buffer); err != nil {
+			if err := (*dbInstance).SaveEntries(buffer, ""); err != nil {
 				log.Errorf("Failed to save final batch: %v", err)
 			} else {
 				log.Debugf("Saved final batch of %d entries", bufferLen)
@@ -256,7 +262,7 @@ func ProcessFilesForFullScan(scanConfig ScanConfig, fileChan <-chan object.FileI
 	fileWg.Add(1)
 	go func() {
 		defer fileWg.Done()
-		for fileInfo := range fileChan {
+		for fileInfo := range scannedChan {
 			// 打印文件路径
 			fileePath := filepath.Join(scanConfig.Path, fileInfo.Key())
 			if reportConfig.Quiet {
@@ -295,6 +301,135 @@ func ProcessFilesForFullScan(scanConfig ScanConfig, fileChan <-chan object.FileI
 }
 
 // ProcessFilesForFullScan 处理文件统计信息并分发到数据库和Kafka
-func ProcessFilesForIncrementalScan(scanConfig ScanConfig, fileChan <-chan object.FileInfo, reportConfig ReportConfig) error {
-	return nil
+func ProcessFilesForIncrementalScan(scanConfig ScanConfig, scannedChan <-chan object.FileInfo, reportConfig ReportConfig) (<-chan db.FileInfoData, <-chan db.FileInfoData, error) {
+	dbInstance, err := NewDB(scanConfig.DbType, scanConfig.JobDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create database instance: %w", err)
+	}
+
+	bloomNewFiles, candidateChan := bloomPreFilter(scannedChan, dbInstance)
+
+	tempTableName := "temp_files_" + strings.Replace(uuid.New().String(), "-", "_", -1)
+
+	(*dbInstance).CreateTable(tempTableName)
+	loadCandidatesToTemp(candidateChan, dbInstance, tempTableName, scanConfig)
+
+	// 阶段3：联合查询识别变更
+	exactNewFiles := (*dbInstance).QueryExactNewFiles(tempTableName)
+	changedFiles := (*dbInstance).QueryChangedFiles(tempTableName)
+
+	// 创建通道
+	newFileChan := make(chan db.FileInfoData, len(bloomNewFiles)+len(exactNewFiles))
+	changedFileChan := make(chan db.FileInfoData, len(changedFiles))
+
+	// 发送新文件到通道
+	for _, file := range bloomNewFiles {
+		newFileChan <- db.ProcessFileInfo(file)
+	}
+	for _, file := range exactNewFiles {
+		newFileChan <- file
+	}
+	close(newFileChan)
+
+	// 发送变更文件到通道
+	for _, file := range changedFiles {
+		changedFileChan <- file
+	}
+	close(changedFileChan)
+
+	return newFileChan, changedFileChan, nil
+}
+
+// bloomPreFilter 使用布隆过滤器预筛选文件路径
+// scannedChan: 扫描到的文件通道
+// db: 数据库实例
+// 返回值: [确认的新文件列表, 需要进一步验证的候选文件通道]
+func bloomPreFilter(scannedChan <-chan object.FileInfo, dbInstance *db.DB) ([]object.FileInfo, chan object.FileInfo) {
+	// 初始化布隆过滤器 (1亿数据，0.1%误判率约需143MB内存)
+	filter := bloom.NewWithEstimates(1e8, 0.001)
+
+	// 预热过滤器：加载数据库现有路径
+	rows, _ := (*dbInstance).Query("SELECT path FROM file_entries")
+	for rows.Next() {
+		var path string
+		rows.Scan(&path)
+		filter.AddString(path)
+	}
+	// 检查遍历过程中是否有错误
+	if err := rows.Err(); err != nil {
+		log.Errorf("Error reading rows: %v", err)
+	}
+	rows.Close()
+
+	// 双通道输出
+	newFilesChan := make(chan object.FileInfo, 10000)
+	candidateChan := make(chan object.FileInfo, 100000)
+
+	// 使用sync.WaitGroup等待goroutine完成
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		for item := range scannedChan {
+			if !filter.TestString(item.Key()) {
+				// 布隆过滤器确认的新增文件
+				newFilesChan <- item
+			} else {
+				// 需要进一步验证的候选文件
+				candidateChan <- item
+			}
+		}
+		close(newFilesChan)
+		close(candidateChan)
+	}()
+
+	// 收集新文件到切片
+	newFiles := make([]object.FileInfo, 0, 10000)
+	var collectWg sync.WaitGroup
+	collectWg.Add(1)
+	go func() {
+		defer collectWg.Done()
+		for file := range newFilesChan {
+			newFiles = append(newFiles, file)
+		}
+	}()
+
+	// 等待处理完成
+	wg.Wait()
+	collectWg.Wait()
+
+	return newFiles, candidateChan
+}
+
+func loadCandidatesToTemp(candidateChan <-chan object.FileInfo, dbInstance *db.DB, tableName string, scanConfig ScanConfig) {
+	var buffer []object.FileInfo
+	var totalSaved int // 统计总共保存的记录数
+	for fileInfo := range candidateChan {
+		buffer = append(buffer, fileInfo)
+		bufferLen := len(buffer)
+		if bufferLen >= scanConfig.DBBatchSize {
+			startTime := time.Now()
+			if err := (*dbInstance).SaveEntries(buffer, tableName); err != nil {
+				log.Errorf("Failed to save batch: %v", err)
+			} else {
+				log.Debugf("Saved batch of %d entries in %v", bufferLen, time.Since(startTime))
+				totalSaved += bufferLen
+			}
+			buffer = make([]object.FileInfo, 0, scanConfig.DBBatchSize)
+		}
+	}
+	// 处理剩余数据
+	bufferLen := len(buffer)
+	if bufferLen > 0 {
+		if err := (*dbInstance).SaveEntries(buffer, tableName); err != nil {
+			log.Errorf("Failed to save final batch: %v", err)
+		} else {
+			log.Debugf("Saved final batch of %d entries", bufferLen)
+			totalSaved += bufferLen
+		}
+	}
+	// 记录总共保存的记录数
+	log.Infof("Successfully saved total %d entries to database", totalSaved)
+
 }

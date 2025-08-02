@@ -25,8 +25,8 @@ func ParseConditions(input string) []string {
 	return filteredConditions
 }
 
-// initDatabase initializes the database connection
-func InitDatabase(dbType, jobsDir string) (db.DB, error) {
+// NewDB open the database connection
+func NewDB(dbType, jobsDir string) (*db.DB, error) {
 	dbPath := filepath.Join(jobsDir, "index.db")
 	// Create database directory if it doesn't exist
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
@@ -40,7 +40,17 @@ func InitDatabase(dbType, jobsDir string) (db.DB, error) {
 		return nil, fmt.Errorf("failed to create database instance: %w", err)
 	}
 
-	if err := dbInstance.Init(); err != nil {
+	return &dbInstance, nil
+}
+
+// InitDatabase initializes the database connection
+func InitDatabase(dbType, jobsDir string) (*db.DB, error) {
+	dbInstance, err := NewDB(dbType, jobsDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database instance: %w", err)
+	}
+
+	if err := (*dbInstance).CreateTable("file_entries"); err != nil {
 		log.Errorf("failed to initialize database: %w", err)
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}

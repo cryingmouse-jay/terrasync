@@ -41,11 +41,11 @@ func printToConsoleAndLog(format string, args ...interface{}) {
 	log.Infof(format, args...)
 }
 
-func GenerateConsoleReportSummary(reportConfig ReportConfig, stats Stats, dbInstance db.DB) {
+func GenerateConsoleReportSummary(reportConfig ReportConfig, stats Stats, dbInstance *db.DB) {
 	totalTime := time.Since(reportConfig.StartTime)
 
 	// Get unique extension count with error handling
-	extCount, err := dbInstance.GetUniqueExtCount()
+	extCount, err := (*dbInstance).GetUniqueExtCount()
 	if err != nil {
 		log.Errorf("Failed to get file type count: %v\n", err)
 		extCount = 0 // Set default value in case of error
