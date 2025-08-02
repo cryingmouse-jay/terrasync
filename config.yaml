@@ -23,7 +23,7 @@ database:
 # Kafka configuration
 kafka:
   # Enable Kafka integration
-  enabled: true
+  enabled: false
   # Kafka topic for file events
   topic: scan
   # Kafka host

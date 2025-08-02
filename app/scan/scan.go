@@ -52,6 +52,8 @@ func Start(scanConfig ScanConfig, reportConfig ReportConfig) error {
 		return fmt.Errorf("failed to create exclude conditions: %w", err)
 	}
 
+	GenerateConsoleReportTitle(reportConfig)
+
 	// 开始扫描并应用过滤
 	fileChan := ListAll(storage, scanConfig.Concurrency, matchConditions, excludeConditions)
 
@@ -167,8 +169,6 @@ func ProcessFiles(scanConfig ScanConfig, fileChan <-chan object.FileInfo, report
 			defer kafkaProducer.Close()
 		}
 	}
-
-	GenerateConsoleReportTitle(reportConfig)
 
 	// 创建统计信息实例
 	stats := NewStats()
