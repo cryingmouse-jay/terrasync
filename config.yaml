@@ -1,0 +1,34 @@
+# Configuration file for terrasync
+# Contains settings for scan and migration commands
+
+# Scan command configuration (flags from scan.go)
+scan:
+  # Concurrency threads for scan operation (default: 5)
+  concurrency: 5
+
+# Migration command configuration (flags from migrate.go)
+migrate:
+  # Force overwrite existing files (default: false)
+  overwrite: false
+  # Concurrency level for migration operations (default: 5)
+  concurrency: 1
+
+# Database configuration
+database:
+  # Database type (sqlite)
+  type: sqlite
+  # batch size of file entry to save
+  batch_size: 1000
+
+# Kafka configuration
+kafka:
+  # Enable Kafka integration
+  enabled: true
+  # Kafka topic for file events
+  topic: scan
+  # Kafka host
+  host: 10.131.10.10
+  # Kafka port
+  port: 9092
+  # Concurrency threads for send message to kafka (default: 5)
+  concurrency: 100
