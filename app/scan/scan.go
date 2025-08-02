@@ -61,7 +61,7 @@ func Start(scanConfig ScanConfig, reportConfig ReportConfig) error {
 	GenerateConsoleReportTitle(reportConfig)
 
 	// 开始扫描并应用过滤
-	scannedChan := ListAll(storage, scanConfig.Concurrency, matchConditions, excludeConditions)
+	scannedChan := ListAll(storage, scanConfig.Concurrency, scanConfig.Depth, matchConditions, excludeConditions)
 
 	if scanConfig.IncrementalScan {
 		// 增量扫描场景,处理文件统计信息
@@ -78,20 +78,35 @@ func Start(scanConfig ScanConfig, reportConfig ReportConfig) error {
 
 // ListAll recursively lists all files and directories in the given storage starting
 // with the specified concurrency level
-func ListAll(storage object.Storage, concurrency int, matchConditions, excludeConditions *ConditionFilter) <-chan object.FileInfo {
-	dirs := make(chan string, listDirQueueLen)
+// ListAll recursively lists all files and directories in the given storage starting
+// with the specified concurrency level and depth limit
+func ListAll(storage object.Storage, concurrency int, depth int, matchConditions, excludeConditions *ConditionFilter) <-chan object.FileInfo {
+	// 定义包含路径和深度信息的结构体
+
+	type dirInfo struct {
+		path  string
+		depth int
+	}
+
+	dirs := make(chan dirInfo, listDirQueueLen)
 	results := make(chan object.FileInfo, listQueueLen)
 	var wg sync.WaitGroup
 	var pending int64
 
 	// list processes a single directory, sending files to results and subdirectories to dirs
-	list := func(dir string) error {
+	// currentDepth is the depth of the current directory relative to the root
+	list := func(dir string, currentDepth int) error {
+		// 检查深度限制
+		if depth > 0 && currentDepth > depth {
+			return nil
+		}
+
 		queue, err := storage.List(dir)
 		if err != nil {
 			return fmt.Errorf("storage list failed: %w", err)
 		}
 
-		var subdirs []string
+		var subdirs []dirInfo
 		for o := range queue {
 			// Apply match and exclude filters
 			// 当matchConditions为空时默认匹配，excludeConditions为空时默认不匹配
@@ -101,7 +116,7 @@ func ListAll(storage object.Storage, concurrency int, matchConditions, excludeCo
 				results <- o
 			}
 			if o.IsDir() {
-				subdirs = append(subdirs, o.Key())
+				subdirs = append(subdirs, dirInfo{path: o.Key(), depth: currentDepth + 1})
 			}
 		}
 
@@ -121,8 +136,8 @@ func ListAll(storage object.Storage, concurrency int, matchConditions, excludeCo
 	// worker processes directories from the dirs channel
 	worker := func() {
 		defer wg.Done()
-		for dir := range dirs {
-			if err := list(dir); err != nil {
+		for dirInfo := range dirs {
+			if err := list(dirInfo.path, dirInfo.depth); err != nil {
 				log.Errorf("Scan error: %v", err)
 			}
 
@@ -141,7 +156,7 @@ func ListAll(storage object.Storage, concurrency int, matchConditions, excludeCo
 
 	// Add the initial directory to the queue
 	atomic.AddInt64(&pending, 1)
-	dirs <- "/"
+	dirs <- dirInfo{path: "/", depth: 1}
 
 	// Start a goroutine to close channels when done
 	go func() {
@@ -300,7 +315,8 @@ func ProcessFilesForFullScan(scanConfig ScanConfig, scannedChan <-chan object.Fi
 	return nil
 }
 
-// ProcessFilesForFullScan 处理文件统计信息并分发到数据库和Kafka
+// ProcessFilesForIncrementalScan 处理文件统计信息并分发到数据库和Kafka
+// ProcessFilesForIncrementalScan 处理增量扫描的文件统计信息并分发到数据库
 func ProcessFilesForIncrementalScan(scanConfig ScanConfig, scannedChan <-chan object.FileInfo, reportConfig ReportConfig) (<-chan db.FileInfoData, <-chan db.FileInfoData, error) {
 	dbInstance, err := NewDB(scanConfig.DbType, scanConfig.JobDir)
 	if err != nil {
@@ -342,7 +358,7 @@ func ProcessFilesForIncrementalScan(scanConfig ScanConfig, scannedChan <-chan ob
 
 // bloomPreFilter 使用布隆过滤器预筛选文件路径
 // scannedChan: 扫描到的文件通道
-// db: 数据库实例
+// dbInstance: 数据库实例
 // 返回值: [确认的新文件列表, 需要进一步验证的候选文件通道]
 func bloomPreFilter(scannedChan <-chan object.FileInfo, dbInstance *db.DB) ([]object.FileInfo, chan object.FileInfo) {
 	// 初始化布隆过滤器 (1亿数据，0.1%误判率约需143MB内存)
@@ -402,6 +418,12 @@ func bloomPreFilter(scannedChan <-chan object.FileInfo, dbInstance *db.DB) ([]ob
 	return newFiles, candidateChan
 }
 
+// loadCandidatesToTemp 将候选文件加载到临时表中
+// ctx: 用于控制超时的上下文
+// candidateChan: 候选文件通道
+// dbInstance: 数据库实例
+// tableName: 临时表名称
+// scanConfig: 扫描配置
 func loadCandidatesToTemp(candidateChan <-chan object.FileInfo, dbInstance *db.DB, tableName string, scanConfig ScanConfig) {
 	var buffer []object.FileInfo
 	var totalSaved int // 统计总共保存的记录数
