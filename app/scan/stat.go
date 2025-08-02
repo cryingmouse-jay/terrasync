@@ -148,15 +148,15 @@ func (s *Stats) Print() {
 	printToConsoleAndLog("\n------------------------ Filename Length ------------------------\n\n")
 
 	// Filename length statistics
-	printToConsoleAndLog("  Avg :             %30d\n", s.GetAvgNameLength())
-	printToConsoleAndLog("  Max :             %30d\n", s.GetMaxNameLength())
+	printToConsoleAndLog("  Avg:              %30d\n", s.GetAvgNameLength())
+	printToConsoleAndLog("  Max:              %30d\n", s.GetMaxNameLength())
 
 	// Print another separator
 	printToConsoleAndLog("\n------------------------ Directory Depth ------------------------\n\n")
 
 	// Directory depth statistics
-	printToConsoleAndLog("  Avg dir depth:    %30d\n", s.GetAvgDirDepth())
-	printToConsoleAndLog("  Max dir depth:    %30d\n", s.GetMaxDirDepth())
+	printToConsoleAndLog("  Avg:              %30d\n", s.GetAvgDirDepth())
+	printToConsoleAndLog("  Max:              %30d\n", s.GetMaxDirDepth())
 
 	// Print final separator
 	printToConsoleAndLog("\n-------------------------------------------------------------\n\n")

@@ -6,34 +6,33 @@ import (
 	"path/filepath"
 	"strings"
 	"terrasync/log"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
-// setupJobDirectory creates a clean job directory
-func setupJobDirectory(jobID, exeDir string) (string, error) {
-	if jobID == "" {
-		// Generate timestamp-based jobID (year-month-day_hour.minute.second)
-		jobID = time.Now().Format("2006-01-02_15.04.05")
-	}
-
+// isIncrementalScan checks if a job directory exists and returns true if it does
+func isIncrementalScan(jobID, exeDir string) (string, bool, error) {
 	jobsDir := filepath.Join(exeDir, "jobs", jobID)
 
-	// Clear directory if it exists
-	if err := os.RemoveAll(jobsDir); err != nil && !os.IsNotExist(err) {
-		log.Errorf("Failed to clear directory %s: %v", jobsDir, err)
-		return "", err
+	// Check if directory exists
+	_, err := os.Stat(jobsDir)
+	if err == nil {
+		// Directory exists, mark as incremental scan
+		return jobsDir, true, nil
+	} else if !os.IsNotExist(err) {
+		// Other error occurred
+		log.Errorf("Failed to check directory %s: %v", jobsDir, err)
+		return "", false, err
 	}
 
-	// Create directory with appropriate permissions
+	// Directory does not exist, create it and mark as full scan
 	if err := os.MkdirAll(jobsDir, 0755); err != nil {
 		log.Errorf("Failed to create directory %s: %v", jobsDir, err)
-		return "", err
+		return "", false, err
 	}
 
-	return jobsDir, nil
+	return jobsDir, false, nil
 }
 
 // buildCommandLine constructs a complete command line string

@@ -17,15 +17,16 @@ const (
 
 // ScanConfig 扫描配置选项
 type ScanConfig struct {
-	JobDir      string
-	DbType      string
-	DBBatchSize int
-	Path        string
-	Concurrency int // 并发worker数量
-	Depth       int
-	Match       []string
-	Exclude     []string
-	Timeout     time.Duration // 扫描超时时间
+	IncrementalScan bool
+	JobDir          string
+	DbType          string
+	DBBatchSize     int
+	Path            string
+	Concurrency     int // 并发worker数量
+	Depth           int
+	Match           []string
+	Exclude         []string
+	Timeout         time.Duration // 扫描超时时间
 }
 
 func Start(scanConfig ScanConfig, reportConfig ReportConfig) error {
@@ -57,9 +58,13 @@ func Start(scanConfig ScanConfig, reportConfig ReportConfig) error {
 	// 开始扫描并应用过滤
 	fileChan := ListAll(storage, scanConfig.Concurrency, matchConditions, excludeConditions)
 
-	// 处理文件统计信息
-	if err := ProcessFiles(scanConfig, fileChan, reportConfig); err != nil {
-		return fmt.Errorf("failed to process files: %w", err)
+	if scanConfig.IncrementalScan {
+		// 增量扫描场景,处理文件统计信息
+	} else {
+		// 全量扫描场景,处理文件统计信息
+		if err := ProcessFilesForFullScan(scanConfig, fileChan, reportConfig); err != nil {
+			return fmt.Errorf("failed to process files: %w", err)
+		}
 	}
 
 	return nil
@@ -141,8 +146,8 @@ func ListAll(storage object.Storage, concurrency int, matchConditions, excludeCo
 	return results
 }
 
-// ProcessFiles 处理文件统计信息并分发到数据库和Kafka
-func ProcessFiles(scanConfig ScanConfig, fileChan <-chan object.FileInfo, reportConfig ReportConfig) error {
+// ProcessFilesForFullScan 处理文件统计信息并分发到数据库和Kafka
+func ProcessFilesForFullScan(scanConfig ScanConfig, fileChan <-chan object.FileInfo, reportConfig ReportConfig) error {
 	// Initialize database
 	dbInstance, err := InitDatabase(scanConfig.DbType, scanConfig.JobDir)
 	if err != nil {
@@ -286,5 +291,10 @@ func ProcessFiles(scanConfig ScanConfig, fileChan <-chan object.FileInfo, report
 
 	GenerateConsoleReportSummary(reportConfig, *stats, dbInstance)
 
+	return nil
+}
+
+// ProcessFilesForFullScan 处理文件统计信息并分发到数据库和Kafka
+func ProcessFilesForIncrementalScan(scanConfig ScanConfig, fileChan <-chan object.FileInfo, reportConfig ReportConfig) error {
 	return nil
 }

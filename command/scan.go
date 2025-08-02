@@ -72,40 +72,23 @@ func NewScanCommand(AppVersion string) *cobra.Command {
 			kafkaPort := viper.GetInt("kafka.port")
 			kafkaConcurrency := viper.GetInt("kafka.concurrency")
 
-			depth, err := cmd.Flags().GetInt("depth")
-			if err != nil {
-				return fmt.Errorf("failed to get depth flag: %w", err)
-			}
+			scanID, _ := cmd.Flags().GetString("id")
+			depth, _ := cmd.Flags().GetInt("depth")
+			matchExpr, _ := cmd.Flags().GetString("match")
+			excludeExpr, _ := cmd.Flags().GetString("exclude")
+			csvReport, _ := cmd.Flags().GetBool("csv")
+			htmlReport, _ := cmd.Flags().GetBool("html")
+			quiet, _ := cmd.Flags().GetBool("quiet")
 
-			matchExpr, err := cmd.Flags().GetString("match")
-			if err != nil {
-				return fmt.Errorf("failed to get match flag: %w", err)
+			var jobID string
+			if scanID == "" {
+				// Generate job ID in the format: Job_YYYY-MM-DD_HH.MM.SS.ffffff_scan
+				jobID = fmt.Sprintf("Job_%s_scan", time.Now().Format("2006-01-02_15.04.05.000000"))
+			} else {
+				jobID = fmt.Sprintf("Job_%s_scan", scanID)
 			}
-
-			excludeExpr, err := cmd.Flags().GetString("exclude")
-			if err != nil {
-				return fmt.Errorf("failed to get exclude flag: %w", err)
-			}
-
-			csvReport, err := cmd.Flags().GetBool("csv")
-			if err != nil {
-				return fmt.Errorf("failed to get csv flag: %w", err)
-			}
-
-			htmlReport, err := cmd.Flags().GetBool("html")
-			if err != nil {
-				return fmt.Errorf("failed to get html flag: %w", err)
-			}
-
-			quiet, err := cmd.Flags().GetBool("quiet")
-			if err != nil {
-				return fmt.Errorf("failed to get quiet flag: %w", err)
-			}
-
-			// Generate job ID in the format: Job_YYYY-MM-DD_HH.MM.SS.ffffff_scan
-			jobID := fmt.Sprintf("Job_%s_scan", time.Now().Format("2006-01-02_15.04.05.000000"))
 			// Set up job directory
-			jobsDir, err := setupJobDirectory(jobID, goexeDir)
+			jobsDir, incrementalScan, err := isIncrementalScan(jobID, goexeDir)
 			if err != nil {
 				return err
 			}
@@ -114,14 +97,15 @@ func NewScanCommand(AppVersion string) *cobra.Command {
 
 			// 创建扫描配置结构体
 			scanConfig := scan.ScanConfig{
-				JobDir:      jobsDir,
-				DBBatchSize: dbBatchSize,
-				DbType:      dbType,
-				Path:        scanPath,
-				Concurrency: concurrency,
-				Depth:       depth,
-				Match:       scan.ParseConditions(matchExpr),
-				Exclude:     scan.ParseConditions(excludeExpr),
+				IncrementalScan: incrementalScan,
+				JobDir:          jobsDir,
+				DBBatchSize:     dbBatchSize,
+				DbType:          dbType,
+				Path:            scanPath,
+				Concurrency:     concurrency,
+				Depth:           depth,
+				Match:           scan.ParseConditions(matchExpr),
+				Exclude:         scan.ParseConditions(excludeExpr),
 			}
 
 			reportConfig := scan.ReportConfig{
@@ -151,9 +135,10 @@ func NewScanCommand(AppVersion string) *cobra.Command {
 	}
 
 	// Add command line flags
+	cmd.Flags().StringP("id", "", "", "Job id for scan, special for incremental scan")
 	cmd.Flags().IntP("depth", "d", 0, "Set maximum scan depth")
-	cmd.Flags().StringP("match", "", "", "Filter files using the given expression")
-	cmd.Flags().StringP("exclude", "", "", "Exclude files using the given expression")
+	cmd.Flags().StringP("match", "m", "", "Filter files using the given expression")
+	cmd.Flags().StringP("exclude", "e", "", "Exclude files using the given expression")
 	cmd.Flags().BoolP("csv", "", false, "Create CSV report")
 	cmd.Flags().BoolP("html", "", false, "Create HTML report")
 	cmd.Flags().BoolP("quiet", "q", false, "no output in the console, but in the log.")
